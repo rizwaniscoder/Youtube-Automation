@@ -16,7 +16,7 @@ import tempfile
 import time
 
 # Load API key
-def load_api_key(secret_file_path='D:\\finalproject\\ai\\secrets.toml'):
+def load_api_key(secret_file_path='secrets.toml'):
     try:
         secrets = toml.load(secret_file_path)
         return secrets['OPENAI_API_KEY']
