@@ -2,3 +2,4 @@ streamlit
 OpenAI
 langchain
 moviepy
+langchain_community
