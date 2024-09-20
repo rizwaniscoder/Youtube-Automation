@@ -180,7 +180,7 @@ def create_video(images, audio_path, durations, aspect_ratio, fps=30):
         
         # Resize and pad the image to match the aspect ratio
         img_pil = Image.fromarray(img_array)
-        img_pil = img_pil.resize((target_width, target_height), Image.LANCZOS)  # Updated here
+        img_pil = img_pil.resize((target_width, target_height), Image.LANCZOS)
         clip = ImageClip(np.array(img_pil)).set_duration(duration)
         clip = clip.set_start(cumulative_duration)
         clips.append(clip)
@@ -194,6 +194,18 @@ def create_video(images, audio_path, durations, aspect_ratio, fps=30):
     return final_clip
 
 def main():
+    # Initialize session state variables
+    if 'generated_images' not in st.session_state:
+        st.session_state.generated_images = []
+    if 'durations' not in st.session_state:
+        st.session_state.durations = []
+    if 'image_prompts' not in st.session_state:
+        st.session_state.image_prompts = []
+    if 'video_created' not in st.session_state:
+        st.session_state.video_created = False
+    if 'output_path' not in st.session_state:
+        st.session_state.output_path = None
+    
     # Select response format for transcription
     response_format = st.selectbox("Select transcription response format", ["srt", "json", "text", "verbose_json", "vtt"])
     
@@ -235,6 +247,8 @@ def main():
                     st.write(f"Number of image prompts: {len(image_prompts)}")
                     for timestamp, prompt in image_prompts:
                         st.write(f"[{timestamp}] {prompt}")
+                    # Store prompts in session state
+                    st.session_state.image_prompts = image_prompts
     
                 with st.spinner("Generating images..."):
                     generated_images = []
@@ -251,6 +265,9 @@ def main():
                         else:
                             st.warning(f"Failed to generate image for timestamp {timestamp}")
                     st.success(f"Images generated successfully! Total: {len(generated_images)}")
+                    # Store images and durations in session state
+                    st.session_state.generated_images = generated_images
+                    st.session_state.durations = durations
     
                 if not generated_images:
                     st.error("No images were generated. Cannot create video.")
@@ -260,14 +277,23 @@ def main():
                     try:
                         audio_clip = AudioFileClip(temp_audio_path)
                         final_clip = create_video(generated_images, temp_audio_path, durations, aspect_ratio, fps=30)
-                        output_path = "output_video.mp4"
+                        # Save video to a temporary file
+                        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp_video:
+                            output_path = tmp_video.name
                         final_clip.write_videofile(output_path, codec="libx264", audio_codec="aac", fps=30)
                         st.success("Video created successfully!")
+                        # Store output path in session state
+                        st.session_state.output_path = output_path
+                        st.session_state.video_created = True
     
+                        # Display the video
+                        st.video(output_path)
+    
+                        # Provide a download button
                         with open(output_path, "rb") as file:
                             st.download_button(
                                 label="Download Video",
-                                data=file,
+                                data=file.read(),
                                 file_name="output_video.mp4",
                                 mime="video/mp4"
                             )
@@ -289,6 +315,27 @@ def main():
                             time.sleep(1)  # Wait for 1 second before trying again
                     else:
                         st.warning("Could not delete temporary audio file. It will be deleted when the system restarts.")
+        else:
+            # If video was already created, display it
+            if st.session_state.video_created and st.session_state.output_path:
+                st.video(st.session_state.output_path)
+                # Provide a download button
+                with open(st.session_state.output_path, "rb") as file:
+                    st.download_button(
+                        label="Download Video",
+                        data=file.read(),
+                        file_name="output_video.mp4",
+                        mime="video/mp4"
+                    )
+            # Display generated images and prompts if they exist
+            if st.session_state.generated_images:
+                st.write("Generated Images:")
+                for image, prompt in zip(st.session_state.generated_images, st.session_state.image_prompts):
+                    st.image(image, caption=prompt[1])
+            if st.session_state.image_prompts:
+                st.write("Image Prompts:")
+                for timestamp, prompt in st.session_state.image_prompts:
+                    st.write(f"[{timestamp}] {prompt}")
 
 if __name__ == "__main__":
     main()
