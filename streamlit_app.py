@@ -145,7 +145,7 @@ Begin generating prompts now:
     
     return parsed_result
 
-def generate_image(prompt, aspect_ratio):
+def generate_image(prompt, target_width, target_height):
     url = "https://api.openai.com/v1/images/generations"
     headers = {
         "Authorization": f"Bearer {openai.api_key}",
@@ -163,26 +163,16 @@ def generate_image(prompt, aspect_ratio):
         image_response = requests.get(image_url)
         img = Image.open(io.BytesIO(image_response.content)).convert('RGB')
         
-        # Resize or crop the image to the desired aspect ratio
-        if aspect_ratio == "16:9":
-            target_width, target_height = 1024, 576
-        else:  # "9:16"
-            target_width, target_height = 576, 1024
-        
+        # Resize or crop the image to the desired resolution
         img = img.resize((target_width, target_height), Image.LANCZOS)
         return img
     except Exception as e:
         st.error(f"Error generating image: {str(e)}")
         return None
 
-def create_video(images, audio_path, durations, aspect_ratio, fps=30):
+def create_video(images, audio_path, durations, target_width, target_height, fps=30):
     clips = []
     cumulative_duration = 0
-    
-    if aspect_ratio == "16:9":
-        target_width, target_height = 1024, 576
-    else:  # 9:16
-        target_width, target_height = 576, 1024
     
     for image, duration in zip(images, durations):
         img_array = np.array(image)
@@ -217,7 +207,15 @@ def main():
     uploaded_file = st.file_uploader("Upload an audio file", type=["mp3", "wav", "m4a"])
     user_prompt = st.text_input("Optional: Enter a prompt to guide image generation", "")
     interval = st.number_input("Enter interval for image change (in seconds)", min_value=1, value=10)
-    aspect_ratio = st.selectbox("Select video aspect ratio", ["16:9", "9:16"])
+    # Image resolution options
+    image_resolution = st.selectbox("Select image resolution", ["1024x576 (16:9)", "576x1024 (9:16)"])
+    
+    if image_resolution == "1024x576 (16:9)":
+        target_width, target_height = 1024, 576
+        aspect_ratio = "16:9"
+    else:
+        target_width, target_height = 576, 1024
+        aspect_ratio = "9:16"
     
     if uploaded_file is not None:
         st.audio(uploaded_file)
@@ -260,7 +258,7 @@ def main():
                     for i, (timestamp, prompt) in enumerate(image_prompts):
                         if i * interval >= total_duration:
                             break
-                        image = generate_image(prompt, aspect_ratio)
+                        image = generate_image(prompt, target_width, target_height)
                         if image:
                             generated_images.append(image)
                             duration = min(interval, total_duration - i * interval)
@@ -280,7 +278,7 @@ def main():
                 with st.spinner("Creating video..."):
                     try:
                         audio_clip = AudioFileClip(temp_audio_path)
-                        final_clip = create_video(generated_images, temp_audio_path, durations, aspect_ratio, fps=30)
+                        final_clip = create_video(generated_images, temp_audio_path, durations, target_width, target_height, fps=30)
                         # Save video to a temporary file
                         with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp_video:
                             output_path = tmp_video.name
