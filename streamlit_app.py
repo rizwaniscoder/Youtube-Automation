@@ -1,12 +1,12 @@
 import streamlit as st
 import os
-from openai import OpenAI
+from dotenv import load_dotenv, set_key
+import openai
 from langchain.prompts import PromptTemplate
 from langchain.llms import OpenAI as LangChainOpenAI
 from langchain.chains import LLMChain
 from PIL import Image
 import requests
-import toml
 import io
 import numpy as np
 import math
@@ -15,24 +15,28 @@ from moviepy.audio.io.AudioFileClip import AudioFileClip
 import tempfile
 import time
 
-# Load API key
-def load_api_key(secret_file_path='secrets.toml'):
-    try:
-        secrets = toml.load(secret_file_path)
-        return secrets['OPENAI_API_KEY']
-    except Exception as e:
-        st.error(f"Error loading API key: {e}")
-        return None
+# Load environment variables from .env file
+load_dotenv()
 
-OPENAI_API_KEY = load_api_key()
+# Require OpenAI API key at start
+if 'OPENAI_API_KEY' not in os.environ or not os.environ['OPENAI_API_KEY']:
+    api_key = st.text_input("Please enter your OpenAI API Key", type="password")
+    if api_key:
+        os.environ['OPENAI_API_KEY'] = api_key
+        # Save API key to .env file
+        set_key(".env", "OPENAI_API_KEY", api_key)
+        st.success("API Key saved to .env file")
+    else:
+        st.stop()
+else:
+    st.write("Using OpenAI API Key from environment.")
 
-# Initialize OpenAI client
-client = OpenAI(api_key=OPENAI_API_KEY)
+openai.api_key = os.environ['OPENAI_API_KEY']
 
 def transcribe_audio(audio_path):
     try:
         with open(audio_path, 'rb') as audio_file:
-            transcript = client.audio.transcriptions.create(
+            transcript = openai.Audio.transcribe(
                 model="whisper-1", 
                 file=audio_file,
                 response_format="srt"
@@ -46,7 +50,7 @@ def parse_srt(srt_string):
     srt_parts = srt_string.strip().split('\n\n')
     parsed_srt = []
     for part in srt_parts:
-        lines = part.split('\n')
+        lines = part.strip().split('\n')
         if len(lines) >= 3:
             time_range = lines[1]
             text = ' '.join(lines[2:])
@@ -55,7 +59,7 @@ def parse_srt(srt_string):
     return parsed_srt
 
 def generate_timestamped_prompts(transcript, user_prompt, interval, total_duration):
-    llm = LangChainOpenAI(temperature=0.7, api_key=OPENAI_API_KEY)
+    llm = LangChainOpenAI(temperature=0.7, api_key=os.environ['OPENAI_API_KEY'])
     
     # Calculate the number of prompts
     num_prompts = math.ceil(total_duration / interval)
@@ -63,21 +67,23 @@ def generate_timestamped_prompts(transcript, user_prompt, interval, total_durati
     prompt_template = PromptTemplate(
         input_variables=["text", "user_prompt", "interval", "total_duration", "num_prompts"],
         template="""
-        Given the following transcript, a {interval}-second interval, and a total duration of {total_duration} seconds, generate image prompts:
+Given the following transcript, a {interval}-second interval, and a total duration of {total_duration} seconds, generate image prompts:
 
-        Transcript: {text}
+Transcript: {text}
 
-        User prompt: {user_prompt}
+User prompt: {user_prompt}
 
-        Create exactly {num_prompts} AI image prompts to generate highly detailed, cinematic CGI images in 4K. Do not add any words or branding to the images. Avoid image prompts that focus on any specific person.
+Create exactly {num_prompts} AI image prompts to generate highly detailed, cinematic CGI images in 4K. Do not add any words or branding to the images. Avoid image prompts that focus on any specific person.
 
-        Format your response as follows:
-        [Start time-End time] Image prompt
+Ensure that all prompts comply with DALL·E content policy to avoid any disallowed content.
 
-        Ensure that the timestamps cover the entire duration of the audio, adjusting the last timestamp if necessary.
+Format your response as follows:
+[Start time-End time] Image prompt
 
-        Begin generating prompts now:
-        """
+Ensure that the timestamps cover the entire duration of the audio, adjusting the last timestamp if necessary.
+
+Begin generating prompts now:
+"""
     )
     
     chain = LLMChain(llm=llm, prompt=prompt_template)
@@ -95,35 +101,24 @@ def generate_timestamped_prompts(transcript, user_prompt, interval, total_durati
     
     # Parse the result into a list of tuples (timestamp, prompt)
     parsed_result = []
-    for i in range(num_prompts):
-        start_time = i * interval
-        end_time = min((i + 1) * interval, total_duration)
-        timestamp = f"{start_time:.2f}-{end_time:.2f}"
-        
-        # Find the corresponding prompt in the result
-        prompt_start = result.find(f"[{start_time}")
-        prompt_end = result.find("\n", prompt_start)
-        if prompt_start != -1 and prompt_end != -1:
-            prompt = result[prompt_start:prompt_end].split("]", 1)[1].strip()
-        else:
-            prompt = f"Generated image for timestamp {timestamp}"
-        
-        parsed_result.append((timestamp, prompt))
+    lines = result.strip().split('\n')
+    for line in lines:
+        if line.startswith('[') and ']' in line:
+            timestamp, prompt = line.split(']', 1)
+            timestamp = timestamp.strip('[]')
+            prompt = prompt.strip()
+            parsed_result.append((timestamp, prompt))
     
     return parsed_result
 
 def generate_image(prompt, size="1024x1024"):
-    client = OpenAI(api_key=OPENAI_API_KEY)
-    
     try:
-        response = client.images.generate(
-            model="dall-e-3",
+        response = openai.Image.create(
             prompt=prompt,
-            size=size,
-            quality="hd",
             n=1,
+            size=size,
         )
-        image_url = response.data[0].url
+        image_url = response['data'][0]['url']
         image_response = requests.get(image_url)
         return Image.open(io.BytesIO(image_response.content))
     except Exception as e:
@@ -135,36 +130,21 @@ def create_video(images, audio_path, durations, aspect_ratio, fps=30):
     cumulative_duration = 0
     
     if aspect_ratio == "16:9":
-        target_width, target_height = 3840, 2160  # 4K resolution
+        target_width, target_height = 1920, 1080  # Standard HD resolution
     else:  # 9:16
-        target_width, target_height = 2160, 3840  # 4K vertical video
+        target_width, target_height = 1080, 1920  # Vertical video
     
     for image, duration in zip(images, durations):
-        img_array = np.array(image)
+        img_array = np.array(image.convert('RGB'))
         
         # Resize and pad the image
-        h, w = img_array.shape[:2]
-        aspect = w / h
-        target_aspect = target_width / target_height
-        
-        if aspect > target_aspect:
-            new_w = target_width
-            new_h = int(new_w / aspect)
-            img_resized = Image.fromarray(img_array).resize((new_w, new_h), Image.LANCZOS)
-            img_padded = Image.new('RGB', (target_width, target_height), (0, 0, 0))
-            img_padded.paste(img_resized, ((target_width - new_w) // 2, (target_height - new_h) // 2))
-        else:
-            new_h = target_height
-            new_w = int(new_h * aspect)
-            img_resized = Image.fromarray(img_array).resize((new_w, new_h), Image.LANCZOS)
-            img_padded = Image.new('RGB', (target_width, target_height), (0, 0, 0))
-            img_padded.paste(img_resized, ((target_width - new_w) // 2, (target_height - new_h) // 2))
-        
-        clip = ImageClip(np.array(img_padded)).set_duration(duration)
+        img_pil = Image.fromarray(img_array)
+        img_pil = img_pil.resize((target_width, target_height), Image.ANTIALIAS)
+        clip = ImageClip(np.array(img_pil)).set_duration(duration)
         clip = clip.set_start(cumulative_duration)
         clips.append(clip)
         cumulative_duration += duration
-
+    
     video = CompositeVideoClip(clips, size=(target_width, target_height))
     audio = AudioFileClip(audio_path)
     final_clip = video.set_audio(audio)
@@ -178,7 +158,7 @@ def main():
     uploaded_file = st.file_uploader("Upload an audio file", type=["mp3", "wav", "m4a"])
     user_prompt = st.text_input("Optional: Enter a prompt to guide image generation", "")
     interval = st.number_input("Enter interval for image change (in seconds)", min_value=1, value=10)
-    image_size = st.selectbox("Select image size", ["1024x1024", "1792x1024", "1024x1792"])
+    image_size = st.selectbox("Select image size", ["256x256", "512x512", "1024x1024"])
     aspect_ratio = st.selectbox("Select video aspect ratio", ["16:9", "9:16"])
 
     if uploaded_file is not None:
@@ -205,7 +185,7 @@ def main():
 
                 audio = AudioFileClip(temp_audio_path)
                 total_duration = audio.duration
-                st.write(f"Total audio duration: {total_duration} seconds")
+                st.write(f"Total audio duration: {total_duration:.2f} seconds")
 
                 with st.spinner("Generating image prompts..."):
                     image_prompts = generate_timestamped_prompts(transcript, user_prompt, interval, total_duration)
@@ -239,7 +219,7 @@ def main():
                         audio_clip = AudioFileClip(temp_audio_path)
                         final_clip = create_video(generated_images, temp_audio_path, durations, aspect_ratio, fps=30)
                         output_path = "output_video.mp4"
-                        final_clip.write_videofile(output_path, codec="libx264", audio_codec="aac", fps=30, bitrate="20000k")
+                        final_clip.write_videofile(output_path, codec="libx264", audio_codec="aac", fps=30)
                         st.success("Video created successfully!")
 
                         with open(output_path, "rb") as file:
@@ -270,4 +250,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
