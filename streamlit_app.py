@@ -145,7 +145,7 @@ Begin generating prompts now:
     
     return parsed_result
 
-def generate_image(prompt, size="1024x1024"):
+def generate_image(prompt, aspect_ratio):
     url = "https://api.openai.com/v1/images/generations"
     headers = {
         "Authorization": f"Bearer {openai.api_key}",
@@ -154,14 +154,23 @@ def generate_image(prompt, size="1024x1024"):
     data = {
         "prompt": prompt,
         "n": 1,
-        "size": size
+        "size": "1024x1024"  # Request maximum size
     }
     try:
         response = requests.post(url, headers=headers, json=data)
         response.raise_for_status()
         image_url = response.json()["data"][0]["url"]
         image_response = requests.get(image_url)
-        return Image.open(io.BytesIO(image_response.content))
+        img = Image.open(io.BytesIO(image_response.content)).convert('RGB')
+        
+        # Resize or crop the image to the desired aspect ratio
+        if aspect_ratio == "16:9":
+            target_width, target_height = 1024, 576
+        else:  # "9:16"
+            target_width, target_height = 576, 1024
+        
+        img = img.resize((target_width, target_height), Image.LANCZOS)
+        return img
     except Exception as e:
         st.error(f"Error generating image: {str(e)}")
         return None
@@ -171,17 +180,13 @@ def create_video(images, audio_path, durations, aspect_ratio, fps=30):
     cumulative_duration = 0
     
     if aspect_ratio == "16:9":
-        target_width, target_height = 1920, 1080  # Standard HD resolution
+        target_width, target_height = 1024, 576
     else:  # 9:16
-        target_width, target_height = 1080, 1920  # Vertical video
+        target_width, target_height = 576, 1024
     
     for image, duration in zip(images, durations):
-        img_array = np.array(image.convert('RGB'))
-        
-        # Resize and pad the image to match the aspect ratio
-        img_pil = Image.fromarray(img_array)
-        img_pil = img_pil.resize((target_width, target_height), Image.LANCZOS)
-        clip = ImageClip(np.array(img_pil)).set_duration(duration)
+        img_array = np.array(image)
+        clip = ImageClip(img_array).set_duration(duration)
         clip = clip.set_start(cumulative_duration)
         clips.append(clip)
         cumulative_duration += duration
@@ -212,7 +217,6 @@ def main():
     uploaded_file = st.file_uploader("Upload an audio file", type=["mp3", "wav", "m4a"])
     user_prompt = st.text_input("Optional: Enter a prompt to guide image generation", "")
     interval = st.number_input("Enter interval for image change (in seconds)", min_value=1, value=10)
-    image_size = st.selectbox("Select image size", ["256x256", "512x512", "1024x1024"])
     aspect_ratio = st.selectbox("Select video aspect ratio", ["16:9", "9:16"])
     
     if uploaded_file is not None:
@@ -256,7 +260,7 @@ def main():
                     for i, (timestamp, prompt) in enumerate(image_prompts):
                         if i * interval >= total_duration:
                             break
-                        image = generate_image(prompt, size=image_size)
+                        image = generate_image(prompt, aspect_ratio)
                         if image:
                             generated_images.append(image)
                             duration = min(interval, total_duration - i * interval)
