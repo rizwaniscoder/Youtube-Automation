@@ -1,6 +1,7 @@
 streamlit
-OpenAI
+openai==0.27.0
 langchain
 moviepy
 langchain_community
 ffmpeg
+imageio
