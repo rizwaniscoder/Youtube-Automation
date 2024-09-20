@@ -180,7 +180,7 @@ def create_video(images, audio_path, durations, aspect_ratio, fps=30):
         
         # Resize and pad the image to match the aspect ratio
         img_pil = Image.fromarray(img_array)
-        img_pil = img_pil.resize((target_width, target_height), Image.ANTIALIAS)
+        img_pil = img_pil.resize((target_width, target_height), Image.LANCZOS)  # Updated here
         clip = ImageClip(np.array(img_pil)).set_duration(duration)
         clip = clip.set_start(cumulative_duration)
         clips.append(clip)
