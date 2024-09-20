@@ -1,6 +1,5 @@
 import streamlit as st
 import os
-from dotenv import load_dotenv, set_key
 import openai
 from langchain.prompts import PromptTemplate
 from langchain.llms import OpenAI as LangChainOpenAI
@@ -15,51 +14,86 @@ from moviepy.audio.io.AudioFileClip import AudioFileClip
 import tempfile
 import time
 
-# Load environment variables from .env file
-load_dotenv()
+# Always require OpenAI API key at start
+st.title("Video Automation App")
 
-# Require OpenAI API key at start
-if 'OPENAI_API_KEY' not in os.environ or not os.environ['OPENAI_API_KEY']:
-    api_key = st.text_input("Please enter your OpenAI API Key", type="password")
-    if api_key:
-        os.environ['OPENAI_API_KEY'] = api_key
-        # Save API key to .env file
-        set_key(".env", "OPENAI_API_KEY", api_key)
-        st.success("API Key saved to .env file")
-    else:
-        st.stop()
+api_key = st.text_input("Please enter your OpenAI API Key", type="password")
+if api_key:
+    openai.api_key = api_key
+    # Save API key to .env file
+    with open(".env", "w") as f:
+        f.write(f"OPENAI_API_KEY={api_key}\n")
+    st.success("API Key saved to .env file")
 else:
-    st.write("Using OpenAI API Key from environment.")
+    st.error("OpenAI API Key is required to proceed.")
+    st.stop()
 
-openai.api_key = os.environ['OPENAI_API_KEY']
-
-def transcribe_audio(audio_path):
+def transcribe_audio(audio_path, response_format="srt"):
+    url = "https://api.openai.com/v1/audio/transcriptions"
+    headers = {
+        "Authorization": f"Bearer {openai.api_key}"
+    }
+    data = {
+        "model": "whisper-1",
+        "response_format": response_format
+    }
     try:
         with open(audio_path, 'rb') as audio_file:
-            transcript = openai.Audio.transcribe(
-                model="whisper-1", 
-                file=audio_file,
-                response_format="srt"
-            )
-        return transcript
+            files = {
+                "file": (os.path.basename(audio_path), audio_file, "application/octet-stream")
+            }
+            response = requests.post(url, headers=headers, data=data, files=files)
+            response.raise_for_status()
+            if response_format in ["json", "verbose_json"]:
+                return response.json()
+            else:
+                return response.text
     except Exception as e:
         st.error(f"Error transcribing audio: {e}")
         return None
 
-def parse_srt(srt_string):
-    srt_parts = srt_string.strip().split('\n\n')
-    parsed_srt = []
-    for part in srt_parts:
-        lines = part.strip().split('\n')
-        if len(lines) >= 3:
-            time_range = lines[1]
-            text = ' '.join(lines[2:])
-            start_time, end_time = time_range.split(' --> ')
-            parsed_srt.append((start_time, end_time, text))
-    return parsed_srt
+def parse_transcript(transcript_response, response_format):
+    if response_format == "srt":
+        # Parse SRT formatted transcript
+        srt_string = transcript_response
+        srt_parts = srt_string.strip().split('\n\n')
+        parsed_transcript = []
+        for part in srt_parts:
+            lines = part.strip().split('\n')
+            if len(lines) >= 3:
+                time_range = lines[1]
+                text = ' '.join(lines[2:])
+                start_time_str, end_time_str = time_range.split(' --> ')
+                # Convert time strings to seconds
+                start_time = time_str_to_seconds(start_time_str)
+                end_time = time_str_to_seconds(end_time_str)
+                parsed_transcript.append((start_time, end_time, text))
+        return parsed_transcript
+    elif response_format in ["json", "verbose_json"]:
+        # Parse JSON formatted transcript
+        parsed_transcript = []
+        for segment in transcript_response['segments']:
+            start_time = segment['start']
+            end_time = segment['end']
+            text = segment['text'].strip()
+            parsed_transcript.append((start_time, end_time, text))
+        return parsed_transcript
+    elif response_format == "text":
+        # Simple text transcript without timestamps
+        text = transcript_response.strip()
+        return [(0, None, text)]
+    else:
+        st.error(f"Unsupported response format: {response_format}")
+        return []
+
+def time_str_to_seconds(time_str):
+    h, m, s_ms = time_str.split(':')
+    s, ms = s_ms.split(',')
+    total_seconds = int(h) * 3600 + int(m) * 60 + int(s) + int(ms) / 1000
+    return total_seconds
 
 def generate_timestamped_prompts(transcript, user_prompt, interval, total_duration):
-    llm = LangChainOpenAI(temperature=0.7, api_key=os.environ['OPENAI_API_KEY'])
+    llm = LangChainOpenAI(temperature=0.7, openai_api_key=openai.api_key)
     
     # Calculate the number of prompts
     num_prompts = math.ceil(total_duration / interval)
@@ -112,13 +146,20 @@ Begin generating prompts now:
     return parsed_result
 
 def generate_image(prompt, size="1024x1024"):
+    url = "https://api.openai.com/v1/images/generations"
+    headers = {
+        "Authorization": f"Bearer {openai.api_key}",
+        "Content-Type": "application/json"
+    }
+    data = {
+        "prompt": prompt,
+        "n": 1,
+        "size": size
+    }
     try:
-        response = openai.Image.create(
-            prompt=prompt,
-            n=1,
-            size=size,
-        )
-        image_url = response['data'][0]['url']
+        response = requests.post(url, headers=headers, json=data)
+        response.raise_for_status()
+        image_url = response.json()["data"][0]["url"]
         image_response = requests.get(image_url)
         return Image.open(io.BytesIO(image_response.content))
     except Exception as e:
@@ -137,7 +178,7 @@ def create_video(images, audio_path, durations, aspect_ratio, fps=30):
     for image, duration in zip(images, durations):
         img_array = np.array(image.convert('RGB'))
         
-        # Resize and pad the image
+        # Resize and pad the image to match the aspect ratio
         img_pil = Image.fromarray(img_array)
         img_pil = img_pil.resize((target_width, target_height), Image.ANTIALIAS)
         clip = ImageClip(np.array(img_pil)).set_duration(duration)
@@ -153,17 +194,18 @@ def create_video(images, audio_path, durations, aspect_ratio, fps=30):
     return final_clip
 
 def main():
-    st.title("Video Automation App")
-
+    # Select response format for transcription
+    response_format = st.selectbox("Select transcription response format", ["srt", "json", "text", "verbose_json", "vtt"])
+    
     uploaded_file = st.file_uploader("Upload an audio file", type=["mp3", "wav", "m4a"])
     user_prompt = st.text_input("Optional: Enter a prompt to guide image generation", "")
     interval = st.number_input("Enter interval for image change (in seconds)", min_value=1, value=10)
     image_size = st.selectbox("Select image size", ["256x256", "512x512", "1024x1024"])
     aspect_ratio = st.selectbox("Select video aspect ratio", ["16:9", "9:16"])
-
+    
     if uploaded_file is not None:
         st.audio(uploaded_file)
-
+    
         if st.button("Start Automation"):
             temp_audio_path = None
             audio_clip = None
@@ -172,28 +214,28 @@ def main():
                 with tempfile.NamedTemporaryFile(delete=False, suffix=f".{uploaded_file.name.split('.')[-1]}") as tmp_file:
                     tmp_file.write(uploaded_file.getvalue())
                     temp_audio_path = tmp_file.name
-
+    
                 with st.spinner("Transcribing audio..."):
-                    transcript_srt = transcribe_audio(temp_audio_path)
-                    if transcript_srt:
-                        transcript = parse_srt(transcript_srt)
+                    transcript_response = transcribe_audio(temp_audio_path, response_format=response_format)
+                    if transcript_response:
+                        transcript = parse_transcript(transcript_response, response_format)
                         st.success("Audio transcribed successfully!")
                         st.write(f"Number of transcript segments: {len(transcript)}")
                     else:
                         st.error("Failed to transcribe audio.")
                         return
-
+    
                 audio = AudioFileClip(temp_audio_path)
                 total_duration = audio.duration
                 st.write(f"Total audio duration: {total_duration:.2f} seconds")
-
+    
                 with st.spinner("Generating image prompts..."):
                     image_prompts = generate_timestamped_prompts(transcript, user_prompt, interval, total_duration)
                     st.success("Image prompts generated successfully!")
                     st.write(f"Number of image prompts: {len(image_prompts)}")
                     for timestamp, prompt in image_prompts:
                         st.write(f"[{timestamp}] {prompt}")
-
+    
                 with st.spinner("Generating images..."):
                     generated_images = []
                     durations = []
@@ -209,11 +251,11 @@ def main():
                         else:
                             st.warning(f"Failed to generate image for timestamp {timestamp}")
                     st.success(f"Images generated successfully! Total: {len(generated_images)}")
-
+    
                 if not generated_images:
                     st.error("No images were generated. Cannot create video.")
                     return
-
+    
                 with st.spinner("Creating video..."):
                     try:
                         audio_clip = AudioFileClip(temp_audio_path)
@@ -221,7 +263,7 @@ def main():
                         output_path = "output_video.mp4"
                         final_clip.write_videofile(output_path, codec="libx264", audio_codec="aac", fps=30)
                         st.success("Video created successfully!")
-
+    
                         with open(output_path, "rb") as file:
                             st.download_button(
                                 label="Download Video",
