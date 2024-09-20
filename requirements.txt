@@ -3,3 +3,4 @@ OpenAI
 langchain
 moviepy
 langchain_community
+ffmpeg
