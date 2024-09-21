@@ -5,3 +5,6 @@ moviepy
 langchain_community
 ffmpeg
 imageio
+Pillow
+requests
+numpy
