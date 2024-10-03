@@ -15,6 +15,7 @@ import tempfile
 import time
 import asyncio
 import aiohttp
+from datetime import datetime
 
 # Always require OpenAI API key at start
 st.title("Video Automation App")
@@ -155,19 +156,28 @@ Begin generating prompts now:
     
     return parsed_result
 
+def get_timestamp_filename(index):
+    """Generate a filename with the current date and time in the specified format."""
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    return f"generated_image_{timestamp}_{index}.png"
+
 async def generate_image_batch(prompts, target_width, target_height):
     url = "https://api.openai.com/v1/images/generations"
     headers = {
         "Authorization": f"Bearer {openai.api_key}",
         "Content-Type": "application/json"
     }
-    
-    async def generate_single_image(session, prompt):
+
+    # Create 'images' folder if it doesn't exist
+    os.makedirs('images', exist_ok=True)
+
+    async def generate_single_image(session, prompt, index):
         data = {
             "prompt": prompt,
             "n": 1,
             "size": "1024x1024"  # Request maximum size
         }
+
         try:
             async with session.post(url, headers=headers, json=data) as response:
                 response.raise_for_status()
@@ -177,15 +187,25 @@ async def generate_image_batch(prompts, target_width, target_height):
                     img_data = await img_response.read()
                     img = Image.open(io.BytesIO(img_data)).convert('RGB')
                     img = img.resize((target_width, target_height), Image.LANCZOS)
+                    
+                    # Save the image to the 'images' folder with the new timestamp format
+                    try:
+                        img_filename = get_timestamp_filename(index)
+                        img_path = os.path.join('images', img_filename)
+                        img.save(img_path)
+                        st.success(f"Image saved: {img_path}")
+                    except Exception as save_error:
+                        st.warning(f"Failed to save image {index}: {str(save_error)}")
+                    
                     return img
         except Exception as e:
-            st.error(f"Error generating image: {str(e)}")
+            st.error(f"Error generating image {index}: {str(e)}")
             return None
 
     async with aiohttp.ClientSession() as session:
-        tasks = [generate_single_image(session, prompt) for prompt in prompts]
+        tasks = [generate_single_image(session, prompt, i) for i, prompt in enumerate(prompts)]
         return await asyncio.gather(*tasks)
-
+    
 def create_video(images, audio_paths, durations, target_width, target_height, fps=30):
     clips = []
     cumulative_duration = 0
@@ -208,6 +228,63 @@ def create_video(images, audio_paths, durations, target_width, target_height, fp
     
     return final_clip
 
+async def generate_image_batch_leonardo(prompts, target_width, target_height, api_key):
+    url = "https://cloud.leonardo.ai/api/rest/v1/generations"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json"
+    }
+
+    # Create 'images' folder if it doesn't exist
+    os.makedirs('images', exist_ok=True)
+
+    async def generate_single_image(session, prompt, index):
+        data = {
+            "prompt": prompt,
+            "num_images": 1,
+            "width": 1024,
+            "height": 1024,
+            "modelId": "ac614f96-1082-45bf-be9d-757f2d31c174"
+        }
+
+        try:
+            async with session.post(url, headers=headers, json=data) as response:
+                response.raise_for_status()
+                result = await response.json()
+                generation_id = result["sdGenerationJob"]["generationId"]
+
+                status_url = f"https://cloud.leonardo.ai/api/rest/v1/generations/{generation_id}"
+                while True:
+                    async with session.get(status_url, headers=headers) as status_response:
+                        status_result = await status_response.json()
+                        if status_result["generations_by_pk"]["status"] == "COMPLETE":
+                            image_url = status_result["generations_by_pk"]["generated_images"][0]["url"]
+                            break
+                        await asyncio.sleep(1)
+
+                async with session.get(image_url) as img_response:
+                    img_data = await img_response.read()
+                    img = Image.open(io.BytesIO(img_data)).convert('RGB')
+                    img = img.resize((target_width, target_height), Image.LANCZOS)
+                    
+                    # Save the image to the 'images' folder with the new timestamp format
+                    try:
+                        img_filename = get_timestamp_filename(index)
+                        img_path = os.path.join('images', img_filename)
+                        img.save(img_path)
+                        st.success(f"Image saved: {img_path}")
+                    except Exception as save_error:
+                        st.warning(f"Failed to save image {index}: {str(save_error)}")
+                    
+                    return img
+        except Exception as e:
+            st.error(f"Error generating image {index}: {str(e)}")
+            return None
+
+    async with aiohttp.ClientSession() as session:
+        tasks = [generate_single_image(session, prompt, i) for i, prompt in enumerate(prompts)]
+        return await asyncio.gather(*tasks)
+
 def main():
     # Initialize session state variables
     if 'generated_images' not in st.session_state:
@@ -223,7 +300,15 @@ def main():
     
     # Select response format for transcription
     response_format = st.selectbox("Select transcription response format", ["srt", "json", "text", "verbose_json", "vtt"])
-    
+    image_service = st.selectbox("Select Image Generation Service", ["OpenAI", "Leonardo AI"])
+
+    # If Leonardo AI is selected, require Leonardo API key
+    if image_service == "Leonardo AI":
+        leonardo_api_key = st.text_input("Please enter your Leonardo AI API Key", type="password")
+        if not leonardo_api_key:
+            st.error("Leonardo API Key is required for image generation.")
+            st.stop()
+            
     uploaded_files = st.file_uploader("Upload audio files", type=["mp3", "wav", "m4a"], accept_multiple_files=True)
     user_prompt = st.text_input("Optional: Enter a prompt to guide image generation", "")
     interval = st.number_input("Enter interval for image change (in seconds)", min_value=1, value=10)
@@ -275,7 +360,10 @@ def main():
     
                 with st.spinner("Generating images..."):
                     prompts = [prompt for _, prompt in image_prompts]
-                    generated_images = asyncio.run(generate_image_batch(prompts, target_width, target_height))
+                    if image_service == 'OpenAI':
+                        generated_images = asyncio.run(generate_image_batch(prompts, target_width, target_height))
+                    else:
+                        generated_images = asyncio.run(generate_image_batch_leonardo(prompts, target_width, target_height, leonardo_api_key))
                     
                     durations = []
                     for i, image in enumerate(generated_images):
